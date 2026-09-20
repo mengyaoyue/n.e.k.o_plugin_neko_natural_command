@@ -26,24 +26,6 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-)
-
-
-def _safe_int(value: Any, default: int) -> int:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(float(value.strip()))
-        except ValueError:
-            return default
-    return default
 from typing import Any, Optional
 
 from plugin.sdk.plugin import (
@@ -53,14 +35,13 @@ from plugin.sdk.plugin import (
     SdkError,
     lifecycle,
     llm_tool,
-    plugin_entry,
     neko_plugin,
+    plugin_entry,
 )
 
-from ._panel import PanelServer, find_open_port
 from ._command_logic import (
-    CommandRegistry,
     DEFAULT_ENTRY_REGISTRY,
+    CommandRegistry,
     build_capability_section,
     build_create_prompt,
     build_endpoint_candidates,
@@ -79,14 +60,13 @@ from ._command_logic import (
     normalize_action,
     parse_direct_call_args,
     parse_user_input,
+    parse_video_id,
     refresh_builtin_examples,
     render_entry_list,
     render_plugin_list,
-    safe_str as _safe_str,
-    parse_video_id,
     shortlist_commands,
 )
-
+from ._command_logic import safe_str as _safe_str
 from ._deep_search_logic import (
     build_candidate_queue,
     build_final_report,
@@ -95,12 +75,30 @@ from ._deep_search_logic import (
     build_walk_summary,
     cross_check_codes,
     decode_page_body,
-    extract_code_candidates,
     html_to_text,
     page_has_answer,
     parse_page_analysis,
     parse_selection,
 )
+from ._panel import PanelServer
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
+
+def _safe_int(value: Any, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value.strip()))
+        except ValueError:
+            return default
+    return default
 
 _PLUGIN_ID = "neko_natural_command"
 
@@ -120,8 +118,6 @@ _HELP_TEXT = (
     "- /<任意自然语言>：AI 先在命令库匹配，命中即执行；未命中会自动学一条新命令\n"
     "- 带参数的命令（如「B站搜索 原神」）：搜索词会自动提取，下次任何关键词都能直接用\n"
     "- 「查一查/搜一下」类需求会调用其它插件的能力（联网搜索/运势/陪看…）\n"
-    "- /深搜 <问题>：搜索 → 排好候选网页 → 逐个翻页核实答案，翻到答案或你说停才停\n"
-    "- 「停止深搜」或「别翻了」：叫停正在进行的深搜，已核实的内容会先报给你\n"
     "- /插件：查看本机插件与可直接调用的能力；/调用 插件id:入口id 参数=值：直调插件能力\n"
     "- /cmdlist：列出全部命令；/findcmd <关键词>：按关键词筛选命令\n"
     "- /delcmd <命令ID>：删除命令（admin 级命令需先提权）\n"
@@ -184,6 +180,7 @@ class NaturalCommandPlugin(NekoPluginBase):
         self.deep_search_max_pages: int = 4
         self.deep_search_max_seconds: int = 180
         self.deep_search_progress: bool = True
+        self.deep_search_enabled: bool = False
         self.catgirl_name: str = "猫娘"
         self._config_loaded: bool = False
 
@@ -245,6 +242,7 @@ class NaturalCommandPlugin(NekoPluginBase):
         self.deep_search_max_pages = settings["deep_search_max_pages"]
         self.deep_search_max_seconds = settings["deep_search_max_seconds"]
         self.deep_search_progress = settings["deep_search_progress"]
+        self.deep_search_enabled = settings["deep_search_enabled"]
         self.catgirl_name = settings["catgirl_name"]
         self._config_loaded = True
         try:
@@ -613,6 +611,7 @@ class NaturalCommandPlugin(NekoPluginBase):
             default_permission=self.default_permission,
             default_type=self.default_type,
             capability_text=self._capability_text,
+            deep_search_enabled=self.deep_search_enabled,
         )
         return await self._call_llm_json("你是一个命令路由引擎。", prompt)
 
@@ -657,7 +656,7 @@ class NaturalCommandPlugin(NekoPluginBase):
             return Ok(self._exit_admin())
 
         # 叫停出口：正在深搜时，任何语义为“停止/别翻了”的输入都直接叫停（命令 + 自然语言通用）
-        if self._deep_running() and is_stop_deep_search(user_input):
+        if self.deep_search_enabled and self._deep_running() and is_stop_deep_search(user_input):
             return Ok(self._stop_deep_search())
 
         # admin 权限只在带 / 前缀时生效；不带 / 的自然语言一律按 user 级别处理（与 user 同级），
@@ -690,6 +689,8 @@ class NaturalCommandPlugin(NekoPluginBase):
         if builtin in ("调用", "call"):
             return await self._direct_plugin_call(user_input[len(builtin):].strip(), effective)
         if builtin in ("深搜", "deepsearch", "deep_search"):
+            if not self.deep_search_enabled:
+                return Err(SdkError("深度搜索未开启喵。如需使用，请在插件配置里把 deep_search_enabled 设为 true。"))
             query = user_input[len(builtin):].strip()
             try:
                 return Ok(await self._start_deep_search(query))
@@ -699,6 +700,8 @@ class NaturalCommandPlugin(NekoPluginBase):
                 self.logger.exception("深搜异常: %s", exc)
                 return Err(SdkError(f"深搜出错了喵：{exc}"))
         if builtin in ("停止深搜", "stopdeepsearch", "stop_deep_search", "stopsearch"):
+            if not self.deep_search_enabled:
+                return Err(SdkError("深度搜索未开启喵。如需使用，请在插件配置里把 deep_search_enabled 设为 true。"))
             return Ok(self._stop_deep_search())
 
         # AI 语义匹配或自动创建（威胁审查 risk 与匹配/创建并入同一轮，不额外调用模型）
@@ -725,7 +728,7 @@ class NaturalCommandPlugin(NekoPluginBase):
         if action == "need_args":
             return Ok(self._need_args_message(result))
 
-        if action == "deep_search":
+        if action == "deep_search" and self.deep_search_enabled:
             query = _safe_str(result.get("query")) or user_input
             try:
                 return Ok(await self._start_deep_search(query))
@@ -735,7 +738,7 @@ class NaturalCommandPlugin(NekoPluginBase):
                 self.logger.exception("深搜异常: %s", exc)
                 return Err(SdkError(f"深搜出错了喵：{exc}"))
 
-        if action == "deep_stop":
+        if action == "deep_stop" and self.deep_search_enabled:
             return Ok(self._stop_deep_search())
 
         new_cmd = extract_new_command(result)
@@ -1287,6 +1290,8 @@ class NaturalCommandPlugin(NekoPluginBase):
         },
     )
     async def deep_search_entry(self, query: str = "", max_pages: int = 0, **_):
+        if not self.deep_search_enabled:
+            return Err(SdkError("深度搜索未开启喵。如需使用，请在插件配置里把 deep_search_enabled 设为 true。"))
         try:
             return Ok(await self._start_deep_search(query, max_pages or None))
         except Exception as exc:
@@ -1300,6 +1305,8 @@ class NaturalCommandPlugin(NekoPluginBase):
         input_schema={"type": "object", "properties": {}},
     )
     async def stop_deep_search_entry(self, **_):
+        if not self.deep_search_enabled:
+            return Err(SdkError("深度搜索未开启喵。如需使用，请在插件配置里把 deep_search_enabled 设为 true。"))
         return Ok(self._stop_deep_search())
 
     async def _direct_plugin_call(self, rest: str, effective: str):

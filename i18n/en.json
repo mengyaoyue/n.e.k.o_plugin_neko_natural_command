@@ -1,0 +1,16 @@
+{
+  "plugin.name": "Natural Language Commands",
+  "plugin.description": "Trigger commands with / plus natural language: the AI semantically matches your command library and executes on a hit; on a miss it can learn and save a new command. Supports text replies, shell commands, and calling other plugins, with a three-tier safety review.",
+  "panel.title": "Natural Language Commands - Panel",
+  "panel.subtitle": "The dispatcher for your plugin matrix: talk naturally, learn new commands automatically.",
+  "panel.section.status": "Status",
+  "panel.reload": "Reload commands + capabilities",
+  "panel.toggle_auto_create": "Toggle auto-learn",
+  "panel.section.commands": "Command library",
+  "panel.section.entries": "Callable plugin capabilities",
+  "panel.password_set": "Admin password",
+  "panel.auto_create": "Auto-learn commands",
+  "panel.permission": "Current permission",
+  "panel.model": "Chat model",
+  "panel.installed_plugins": "Installed plugins"
+}
