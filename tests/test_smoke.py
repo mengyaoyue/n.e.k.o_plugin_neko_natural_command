@@ -7,6 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 跨平台 echo：官方 CI 跑在 Ubuntu，Windows 专有的 cmd /c 会失败
+ECHO_OK = "cmd /c echo neko_output_ok" if sys.platform == "win32" else "echo neko_output_ok"
+
 
 def _load_logic_module():
     """加载 _command_logic.py，避开 SDK 导入"""
@@ -237,7 +240,7 @@ class TestCommandLogic:
                 "name": "输出测试",
                 "risk": "harmless",
                 "type": "shell",
-                "content": "cmd /c echo neko_output_ok",
+                "content": ECHO_OK,  # 跨平台：Windows 用 cmd /c，其它平台用 echo
             }
         )
         result = registry.execute_command("echo_test")

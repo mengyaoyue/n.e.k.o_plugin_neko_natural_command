@@ -8,6 +8,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 跨平台 shell 命令（官方 CI 是 Ubuntu）：Windows 用 cmd，其它平台用 sh 等价物
+_WIN = sys.platform == "win32"
+ECHO_OK = "cmd /c echo neko_output_ok" if _WIN else "echo neko_output_ok"
+SLOW_CMD = "cmd /c ping -n 6 127.0.0.1 > nul & echo done" if _WIN else "sleep 5; echo done"
+BIG_OUTPUT_CMD = (
+    "cmd /c (for /l %i in (1,1,2000) do @echo line_%i)" if _WIN else "seq 1 2000"
+)
+
 
 def load_logic():
     spec = importlib.util.spec_from_file_location(
@@ -506,7 +514,7 @@ def main():
                 "name": "输出测试",
                 "risk": "harmless",
                 "type": "shell",
-                "content": "cmd /c echo neko_output_ok",
+                "content": ECHO_OK,
             }
         )
         result = reg_out.execute_command("echo_test")
@@ -529,7 +537,7 @@ def main():
                 "name": "慢查询",
                 "risk": "harmless",
                 "type": "shell",
-                "content": "cmd /c ping -n 6 127.0.0.1 > nul & echo done",
+                "content": SLOW_CMD,  # 跨平台慢命令
             }
         )
         result = reg_fast.execute_command("slow_query")
@@ -550,7 +558,7 @@ def main():
                 "name": "大输出",
                 "risk": "harmless",
                 "type": "shell",
-                "content": "cmd /c (for /l %i in (1,1,2000) do @echo line_%i)",
+                "content": BIG_OUTPUT_CMD,  # 跨平台大输出命令
             }
         )
         result = reg_big.execute_command("big_output")
