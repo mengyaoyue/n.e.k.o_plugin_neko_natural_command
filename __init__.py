@@ -80,7 +80,7 @@ from ._deep_search_logic import (
     parse_page_analysis,
     parse_selection,
 )
-from ._panel import PanelServer
+from ._panel import PanelServer, guess_mime
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -359,8 +359,18 @@ class NaturalCommandPlugin(NekoPluginBase):
             ("GET", "/api/status"): self._panel_status,
             ("POST", "/api/reload"): self._panel_reload,
             ("POST", "/api/toggle_auto_create"): self._panel_toggle_auto_create,
+            ("GET", "/api/panel_prefs"): self._panel_prefs,
+            ("POST", "/api/panel_prefs"): self._panel_prefs,
+            ("POST", "/api/background"): self._panel_background,
+            ("GET", "/api/background"): self._panel_background,
         }
-        server = PanelServer(self._panel_port, self._panel_html, endpoints)
+        server = PanelServer(
+            self._panel_port,
+            self._panel_html,
+            endpoints,
+            static_dir=Path(__file__).parent / "static",
+            asset_provider=self._bg_asset_for,
+        )
         if server.start():
             self._panel_server = server
             self.logger.info("[natural_command] 管理面板已启动: http://127.0.0.1:{}", self._panel_port)
@@ -389,7 +399,9 @@ class NaturalCommandPlugin(NekoPluginBase):
                 "command_count": len(self.registry.commands),
                 "commands": [
                     {"id": cid, "name": c.get("name", cid), "type": str(c.get("type", "reply")),
-                     "permission": str(c.get("permission", "user"))}
+                     "permission": str(c.get("permission", "user")),
+                     "description": _safe_str(c.get("description")),
+                     "risk": _safe_str(c.get("risk"))}
                     for cid, c in self.registry.commands.items()
                 ],
                 "entries": [{"id": e["id"], "desc": e.get("desc", "")} for e in self._entries],
@@ -397,7 +409,166 @@ class NaturalCommandPlugin(NekoPluginBase):
                 "user_permission": self.registry.user_permission,
                 "model": model_info,
                 "panel_port": self._panel_port,
+                "prefs": self._panel_prefs_payload(),
+                "background": self._background_state(),
             }
+
+    _PANEL_PREFS_DEFAULT = {"ui_font": "system", "ui_font_size": "m", "ui_trail": "on"}
+
+    def _panel_prefs_payload(self) -> dict:
+        state = self._load_panel_state()
+        prefs = dict(self._PANEL_PREFS_DEFAULT)
+        saved = state.get("ui")
+        if isinstance(saved, dict):
+            for key in self._PANEL_PREFS_DEFAULT:
+                value = _safe_str(saved.get(key))
+                if value:
+                    prefs[key] = value[:32]
+        return prefs
+
+    def _panel_prefs(self, body: dict) -> dict:
+        """界面偏好（字体 / 字号 / 鼠标轨迹），只影响观感，不影响命令行为。"""
+        prefs = self._panel_prefs_payload()
+        payload = body or {}
+        changed = False
+        for key in self._PANEL_PREFS_DEFAULT:
+            value = _safe_str(payload.get(key)).strip()
+            if value and value != prefs[key]:
+                prefs[key] = value[:32]
+                changed = True
+        if changed:
+            state = self._load_panel_state()
+            state["ui"] = prefs
+            self._save_panel_state(state)
+        return {"ok": True, "prefs": prefs}
+
+    # ── 自定义背景（图存 data/backgrounds/，不进安装包）─────────────
+    _BG_MAX_BYTES = 8 * 1024 * 1024
+    _BG_MIME_EXT = {
+        "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+        "image/webp": ".webp", "image/gif": ".gif",
+    }
+
+    def _bg_dir(self) -> "Path":
+        path = self._panel_state_path().parent / "backgrounds"
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return path
+
+    def _bg_file(self) -> "Optional[Path]":
+        state = self._load_panel_state()
+        name = _safe_str((state.get("ui") or {}).get("bg_file")).strip()
+        if name:
+            candidate = (self._bg_dir() / Path(name).name).resolve()
+            if candidate.is_file():
+                return candidate
+        for suffix in (".png", ".jpg", ".webp", ".gif"):
+            candidate = self._bg_dir() / f"custom{suffix}"
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _background_state(self) -> dict:
+        state = self._load_panel_state()
+        ui = state.get("ui") if isinstance(state.get("ui"), dict) else {}
+        mode = _safe_str(ui.get("bg_mode")).strip() or "default"
+        dim = _safe_str(ui.get("bg_dim")).strip() or "medium"
+        if mode not in ("default", "custom", "plain"):
+            mode = "default"
+        custom = self._bg_file()
+        if mode == "custom" and custom is None:
+            mode = "default"          # 图没了就退回默认，别留一片空白
+        return {
+            "mode": mode,
+            "dim": dim,
+            "has_custom": custom is not None,
+            "custom_bytes": custom.stat().st_size if custom is not None else 0,
+            "custom_name": custom.name if custom is not None else "",
+            "custom_path": "/bg/custom",
+        }
+
+    def _bg_asset(self) -> "Optional[tuple[bytes, str]]":
+        path = self._bg_file()
+        if path is None:
+            return None
+        try:
+            return path.read_bytes(), guess_mime(path.name)
+        except Exception:
+            return None
+
+    def _panel_background(self, body: dict) -> dict:
+        """自定义背景：上传 / 切换模式 / 恢复默认。"""
+        import base64
+        payload = body or {}
+        action = _safe_str(payload.get("action")).strip() or "mode"
+        state = self._load_panel_state()
+        ui = dict(state.get("ui") if isinstance(state.get("ui"), dict) else {})
+
+        if action == "upload":
+            raw = _safe_str(payload.get("image_base64") or payload.get("image")).strip()
+            if not raw:
+                return {"ok": False, "error": "没有收到图片数据。", "background": self._background_state()}
+            if raw.startswith("data:"):
+                head, _, encoded = raw.partition(",")
+                mime = head[5:].split(";")[0].strip().lower()
+            else:
+                encoded, mime = raw, "image/png"
+            ext = self._BG_MIME_EXT.get(mime)
+            if not ext:
+                return {"ok": False, "error": f"不支持的格式：{mime or '未知'}", "background": self._background_state()}
+            try:
+                blob = base64.b64decode(encoded or "", validate=False)
+            except Exception:
+                return {"ok": False, "error": "图片数据解不开。", "background": self._background_state()}
+            if not blob:
+                return {"ok": False, "error": "图片是空的。", "background": self._background_state()}
+            if len(blob) > self._BG_MAX_BYTES:
+                return {"ok": False, "error": f"图片超过 {self._BG_MAX_BYTES // 1048576}MB 限制。", "background": self._background_state()}
+            for suffix in (".png", ".jpg", ".webp", ".gif"):
+                stale = self._bg_dir() / f"custom{suffix}"
+                if stale.is_file():
+                    try:
+                        stale.unlink()
+                    except Exception:
+                        pass
+            target = self._bg_dir() / f"custom{ext}"
+            try:
+                target.write_bytes(blob)
+            except Exception as exc:
+                return {"ok": False, "error": str(exc), "background": self._background_state()}
+            ui["bg_mode"] = "custom"
+            ui["bg_file"] = target.name
+            state["ui"] = ui
+            self._save_panel_state(state)
+            return {"ok": True, "message": "背景已换成你上传的图。", "background": self._background_state()}
+
+        if action == "reset":
+            ui["bg_mode"] = "default"
+            state["ui"] = ui
+            self._save_panel_state(state)
+            return {"ok": True, "message": "已恢复默认背景。", "background": self._background_state()}
+
+        mode = _safe_str(payload.get("mode")).strip() or _safe_str(ui.get("bg_mode")).strip() or "default"
+        if mode not in ("default", "custom", "plain"):
+            return {"ok": False, "error": f"未知模式：{mode}", "background": self._background_state()}
+        if mode == "custom" and self._bg_file() is None:
+            return {"ok": False, "error": "还没上传过背景图。", "background": self._background_state()}
+        ui["bg_mode"] = mode
+        dim = _safe_str(payload.get("dim")).strip()
+        if dim in ("light", "medium", "strong"):
+            ui["bg_dim"] = dim
+        state["ui"] = ui
+        self._save_panel_state(state)
+        return {"ok": True, "background": self._background_state()}
+
+    def _bg_asset_for(self, rel: str) -> "Optional[tuple[bytes, str]]":
+        """面板取自定义背景图（路由 /bg/custom）。"""
+        rel = (rel or "").strip().lstrip("/").split("?", 1)[0]
+        if rel in ("bg/custom", "bg/custom.jpg", "bg/custom.png"):
+            return self._bg_asset()
+        return None
 
     def _panel_reload(self, _body: dict) -> dict:
         self.registry.reload()

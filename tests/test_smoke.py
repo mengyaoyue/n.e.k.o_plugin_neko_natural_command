@@ -638,3 +638,50 @@ class TestKillCommandResolution:
         assert mod.is_kill_command(content)
         assert "bilibili" in content.lower()
 
+
+class TestPanelStyles:
+    """面板 CSS 完整性：缺一条 .hidden 就会让整个面板"点不动"（页签靠它切换）。"""
+
+    def _panel(self):
+        path = ROOT / "static" / "index.html"
+        assert path.is_file(), "面板页缺失"
+        return path.read_text(encoding="utf-8")
+
+    def test_hidden_rule_exists(self):
+        page = self._panel()
+        css = page.split("<style>")[1].split("</style>")[0]
+        assert ".hidden" in css, "缺 .hidden：页签切换会失效，面板看起来像摆设"
+        assert "display:none" in css.replace(" ", "")
+
+    def test_every_used_class_is_defined(self):
+        import re
+
+        page = self._panel()
+        css = page.split("<style>")[1].split("</style>")[0]
+        html = page.split("<script>")[0]
+        js = page.split("<script>")[1].split("</script>")[0]
+        defined = set(re.findall(r"\.([a-zA-Z][\w-]*)", css))
+        used = set()
+        for match in re.finditer(r'class="([^"]+)"', html + js):
+            for token in match.group(1).split():
+                # 只认合法类名：模板三元（${x === 'admin' ? 'warn' : 'info'}）的碎片要滤掉
+                if re.fullmatch(r"[a-zA-Z][\w-]*", token):
+                    used.add(token)
+        for match in re.finditer(r"classList\.(?:add|toggle|remove|contains)\('([\w-]+)'", js):
+            used.add(match.group(1))
+        missing = sorted(c for c in used if c not in defined)
+        assert not missing, f"用了但没定义的样式类：{missing}"
+
+    def test_panel_has_nav_and_panels(self):
+        import re
+
+        page = self._panel()
+        tabs = re.findall(r'data-tab="([^"]+)"', page)
+        panels = re.findall(r'id="tab-([a-z]+)"', page)
+        assert tabs and sorted(tabs) == sorted(panels), f"导航与面板不匹配：{tabs} vs {panels}"
+
+    def test_panel_declares_its_own_port_and_apis(self):
+        page = self._panel()
+        assert "15680" in page, "面板要知道自己的端口（取背景图要用）"
+        assert "/api/panel_prefs" in page and "/api/background" in page
+

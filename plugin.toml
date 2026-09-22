@@ -3,7 +3,7 @@ name = "自然语言命令"
 description = "用 /自然语言 触发本机动作：AI 先在命令库里语义匹配，命中即执行；未命中且开启自动创建时，会生成一条新命令并长期保存。支持文本回复与 shell 系统命令，并对命令做无害 / 无法判定 / 有害三档安全审查——只有可能危害设备的命令需要 /su 提权后执行。"
 short_description = "Run PC actions with /natural-language commands: semantic matching, optional auto-creation, and a three-tier safety audit over reply/shell commands."
 keywords = ["命令", "command", "自然语言", "natural", "自定义", "custom", "路由", "router", "AI", "动态", "dynamic", "安全审查", "security", "权限", "permission", "自动化", "automation", "コマンド", "自然言語", "명령", "자연어"]
-version = "0.6.0"
+version = "0.7.0"
 type = "plugin"
 id = "neko_natural_command"
 entry = "plugin.plugins.neko_natural_command:NaturalCommandPlugin"
@@ -52,3 +52,14 @@ direct_call_permission = "user"
 deep_search_enabled = false
 # AI 回复署名用的猫娘名字
 catgirl_name = "猫娘"
+
+# ── 面板声明：宿主插件管理里才会出现「打开界面」入口 ──────────
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "main"
+title = "自然语言命令 · 管理面板"
+entry = "static/index.html"
+context = "neko_natural_command"
+permissions = ["state:read", "action:call"]
